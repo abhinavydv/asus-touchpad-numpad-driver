@@ -80,6 +80,10 @@ do
             model=ux581l
             break
             ;;
+        "my_numpad" )
+            model="my_numpad"
+            break
+            ;;
         "Q")
             exit 0
             ;;

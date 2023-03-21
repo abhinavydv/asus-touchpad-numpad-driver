@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import importlib
 import logging
 import math
@@ -10,6 +11,7 @@ import sys
 from fcntl import F_SETFL, fcntl
 from time import sleep
 from typing import Optional
+from math import acos, pi, sqrt
 
 import libevdev.const
 from libevdev import EV_ABS, EV_KEY, EV_SYN, Device, InputEvent
@@ -19,14 +21,28 @@ from libevdev import EV_ABS, EV_KEY, EV_SYN, Device, InputEvent
 # LOG=ERROR sudo -E ./asus-touchpad-numpad-driver  # only error messages
 logging.basicConfig()
 log = logging.getLogger('Pad')
-log.setLevel(os.environ.get('LOG', 'INFO'))
+log.setLevel(os.environ.get('LOG', 'DEBUG'))
+
+# Setup ArgumentParser
+ap = argparse.ArgumentParser()
+ap.add_argument("model", default="m433ia")
+ap.add_argument("percentage_key", default="6")
+
+# modes: 0 for off, 1 for touchpad, 2 for dial
+ap.add_argument("available_modes", default="0 1 2")
+
+# dial coordinates: x, y, r
+ap.add_argument("--dial_coords", default="750 850 450")
 
 
 # Select model from command line
 
-model = 'm433ia' # Model used in the derived script (with symbols)
-if len(sys.argv) > 1:
-    model = sys.argv[1]
+# model = 'm433ia' # Model used in the derived script (with symbols)
+# if len(sys.argv) > 1:
+#     model = sys.argv[1]
+
+args = ap.parse_args()
+model = args.model
 
 model_layout = importlib.import_module('numpad_layouts.'+ model)
 
@@ -149,8 +165,21 @@ udev = dev.create_uinput_device()
 BRIGHT_VAL = [hex(val) for val in [31, 24, 1]]
 
 
+def activate_dial():
+    dial_cmd = "i2ctransfer -f -y " + device_id + " w13@0x15 0x05 0x00 0x3d 0x03 0x06 0x00 0x07 0x00 0x0d 0x14 0x03 0x01 0xad"
+    d_t.grab()
+    subprocess.call(dial_cmd, shell=True)
+
+
+def deactivate_dial():
+    dial_cmd = "i2ctransfer -f -y " + device_id + " w13@0x15 0x05 0x00 0x3d 0x03 0x06 0x00 0x07 0x00 0x0d 0x14 0x03 0x00 0xad"
+    d_t.ungrab()
+    subprocess.call(dial_cmd, shell=True)
+
+
 def activate_numlock(brightness):
-    numpad_cmd = "i2ctransfer -f -y " + device_id + " w13@0x15 0x05 0x00 0x3d 0x03 0x06 0x00 0x07 0x00 0x0d 0x14 0x03 " + BRIGHT_VAL[brightness] + " 0xad"
+    numpad_cmd = "i2ctransfer -f -y " + device_id + " w13@0x15 0x05 0x00 0x3d 0x03 0x06 0x00 0x07 0x00 0x0d 0x14 0x03 " + BRIGHT_VAL[2] + " 0xad"
+    # numpad_cmd = "i2ctransfer -f -y " + device_id + " w13@0x15 0x05 0x00 0x3d 0x03 0x06 0x00 0x07 0x00 0x0d 0x14 0x03 " + BRIGHT_VAL[brightness] + " 0xad"
     events = [
         InputEvent(EV_KEY.KEY_NUMLOCK, 1),
         InputEvent(EV_SYN.SYN_REPORT, 0)
@@ -194,18 +223,40 @@ def change_brightness(brightness):
     return brightness
 
 
+def get_angle(ox, oy, x, y):
+    """
+        ox, oy = origin coords
+        x, y = point coords
+    """
+
+    dx = x-ox
+    dy = y-oy
+
+    # if dy < 0:
+    #     return pi + acos(dx/sqrt(dx**2+dy**2))
+    # else:
+    #     return pi - acos(dx/sqrt(dx**2+dy**2))
+
+    return pi + (-1)**(dy<0) * acos(dx/sqrt(dx**2+dy**2))
+
+
 # Run - process and act on events
 
 numlock: bool = False
+dial: bool = False
 pos_x: int = 0
 pos_y: int = 0
 button_pressed: libevdev.const = None
 brightness: int = 0
+available_modes: list[int] = [int(i) for i in args.available_modes.split()]
+mode_index: int = 0
+mode: int = 0  # 0: off, 1: numpad, 2: dial
+start = None  # position of first touch (used for dial and for activate button)
+dial_coords: list[int] = [int(i) for i in args.dial_coords.split()]
 
 while True:
     # If touchpad sends tap events, convert x/y position to numlock key and send it #
     for e in d_t.events():
-
         # ignore others events, except position and finger events
         if not (
             e.matches(EV_ABS.ABS_MT_POSITION_X) or
@@ -217,12 +268,14 @@ while True:
         # Get x position #
         if e.matches(EV_ABS.ABS_MT_POSITION_X):
             x = e.value
-            continue
+            if not button_pressed or mode != 2:
+                continue
 
         # Get y position #
         if e.matches(EV_ABS.ABS_MT_POSITION_Y):
             y = e.value
-            continue
+            if not button_pressed or mode != 2:
+                continue
 
         # Else event is tap: e.matches(EV_KEY.BTN_TOOL_FINGER) #
 
@@ -231,77 +284,118 @@ while True:
             log.debug('finger up at x %d y %d', x, y)
 
             if button_pressed:
-                log.debug('send key up event %s', button_pressed)
-                events = [
-                    InputEvent(EV_KEY.KEY_LEFTSHIFT, 0),
-                    InputEvent(button_pressed, 0),
-                    InputEvent(EV_SYN.SYN_REPORT, 0)
-                ]
+                if mode == 1:
+                    log.debug('send key up event %s', button_pressed)
+                    events = [
+                        InputEvent(EV_KEY.KEY_LEFTSHIFT, 0),
+                        InputEvent(button_pressed, 0),
+                        InputEvent(EV_SYN.SYN_REPORT, 0)
+                    ]
+                    try:
+                        udev.send_events(events)
+                        button_pressed = None
+                    except OSError as err:
+                        log.error("Cannot send release event, %s", err)
+                        pass
+                else:
+                    button_pressed = None
+
+        elif e.value == 1:
+            if not button_pressed:
+                # Start of tap #
+                log.debug('finger down at x %d y %d xr %f yr %f', x, y, x/maxx, y/maxy)
+
+                start = x,y
+                # Check if activate button was hit #
+                if (x > 0.95 * maxx) and (y < 0.09 * maxy):
+                    start = None
+                    # switch to next mode
+                    mode_index = (mode_index+1)%len(available_modes)
+                    mode = available_modes[mode_index]
+                    if mode == 1:
+                        numlock = True
+                        activate_numlock(brightness)
+                        log.debug("numpad activated")
+                    elif numlock:
+                        numlock = False
+                        deactivate_numlock()
+                        log.debug("numpad_deactivated")
+                    if mode == 2:
+                        dial = True
+                        activate_dial()
+                        log.debug("dial activated")
+                    elif dial:
+                        dial = False
+                        deactivate_dial()
+                        log.debug("dial deactivated")
+                    continue
+
+                # Check if caclulator was hit #
+                elif (x < 0.06 * maxx) and (y < 0.07 * maxy):
+                    if numlock:
+                        brightness = change_brightness(brightness)
+                    else:
+                        launch_calculator()
+                    continue
+
+                # if touchpad mode then continue
+                if mode == 0:
+                    continue
+
+                # If not numlock mode, ignore #
+                if not numlock:
+                    button_pressed = True
+                    continue
+
+
+                # else numpad mode is activated
+                col = math.floor(model_layout.cols * x / (maxx+1) )
+                row = math.floor((model_layout.rows * y / maxy) - model_layout.top_offset)
+                # Ignore top_offset region #
+                if row < 0:
+                    continue
+                try:
+                    button_pressed = model_layout.keys[row][col]
+                except IndexError:
+                    # skip invalid row and col values
+                    log.debug('Unhandled col/row %d/%d for position %d-%d', col, row, x, y)
+                    continue
+
+                if button_pressed == EV_KEY.KEY_5:
+                    button_pressed = percentage_key
+
+                # Send press key event #
+                log.debug('send press key event %s', button_pressed)
+
+                if button_pressed == percentage_key:
+                    events = [
+                        InputEvent(EV_KEY.KEY_LEFTSHIFT, 1),
+                        InputEvent(button_pressed, 1),
+                        InputEvent(EV_SYN.SYN_REPORT, 0)
+                    ]
+                else:
+                    events = [
+                        InputEvent(button_pressed, 1),
+                        InputEvent(EV_SYN.SYN_REPORT, 0)
+                    ]
+
                 try:
                     udev.send_events(events)
-                    button_pressed = None
                 except OSError as err:
-                    log.error("Cannot send release event, %s", err)
-                    pass
+                    log.warning("Cannot send press event, %s", err)
+        else:
+            # drag event
 
-        elif e.value == 1 and not button_pressed:
-            # Start of tap #
-            log.debug('finger down at x %d y %d', x, y)
+            if mode == 2:
+                # dial mode
+                # log.debug('dial mode')
 
-            # Check if numlock was hit #
-            if (x > 0.95 * maxx) and (y < 0.09 * maxy):
-                numlock = not numlock
-                if numlock:
-                    activate_numlock(brightness)
-                else:
-                    deactivate_numlock()
-                continue
+                #calculate angle from start
+                # start_angle = acos(start[0]/sqrt(start[0]**2 + start[1]**2)) + pi*(start[1]<0)
+                # curr_angle = acos(x/sqrt(x**2+y**2)) + pi*(y<0)
 
-            # Check if caclulator was hit #
-            elif (x < 0.06 * maxx) and (y < 0.07 * maxy):
-                if numlock:
-                    brightness = change_brightness(brightness)
-                else:
-                    launch_calculator()
-                continue
-
-            # If touchpad mode, ignore #
-            if not numlock:
-                continue
-
-            # else numpad mode is activated
-            col = math.floor(model_layout.cols * x / (maxx+1) )
-            row = math.floor((model_layout.rows * y / maxy) - model_layout.top_offset)
-            # Ignore top_offset region #
-            if row < 0:
-                continue
-            try:
-                button_pressed = model_layout.keys[row][col]
-            except IndexError:
-                # skip invalid row and col values
-                log.debug('Unhandled col/row %d/%d for position %d-%d', col, row, x, y)
-                continue
-            
-            if button_pressed == EV_KEY.KEY_5:
-                button_pressed = percentage_key
-
-            # Send press key event #
-            log.debug('send press key event %s', button_pressed)
-
-            if button_pressed == percentage_key:
-                events = [
-                    InputEvent(EV_KEY.KEY_LEFTSHIFT, 1),
-                    InputEvent(button_pressed, 1),
-                    InputEvent(EV_SYN.SYN_REPORT, 0)
-                ]
-            else:
-                events = [
-                    InputEvent(button_pressed, 1),
-                    InputEvent(EV_SYN.SYN_REPORT, 0)
-                ]
-
-            try:
-                udev.send_events(events)
-            except OSError as err:
-                log.warning("Cannot send press event, %s", err)
+                start_angle = get_angle(*dial_coords[:2], *start)
+                curr_angle = get_angle(*dial_coords[:2], x, y)
+                angle = (curr_angle - start_angle)%(2*pi)
+                log.debug([dial_coords, start, x, y, start_angle, curr_angle, angle])
     sleep(0.1)

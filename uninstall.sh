@@ -6,13 +6,13 @@ then
 	exit 1
 fi
 
-modprobe -r i2c-dev
+# modprobe -r i2c-dev
 
-if [[ $? != 0 ]]
-then
-	echo "i2c-dev module cannot be removed successfuly..."
-	exit 1
-fi
+# if [[ $? != 0 ]]
+# then
+# 	echo "i2c-dev module cannot be removed successfuly..."
+# 	exit 1
+# fi
 
 systemctl stop asus_touchpad_numpad
 if [[ $? != 0 ]]
