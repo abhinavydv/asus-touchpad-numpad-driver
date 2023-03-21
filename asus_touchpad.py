@@ -12,6 +12,7 @@ from fcntl import F_SETFL, fcntl
 from time import sleep
 from typing import Optional
 from math import acos, pi, sqrt
+import time
 
 import libevdev.const
 from libevdev import EV_ABS, EV_KEY, EV_SYN, Device, InputEvent
@@ -232,6 +233,9 @@ def get_angle(ox, oy, x, y):
     dx = x-ox
     dy = y-oy
 
+    if dx == dy == 0:
+        return 0
+
     # if dy < 0:
     #     return pi + acos(dx/sqrt(dx**2+dy**2))
     # else:
@@ -398,4 +402,5 @@ while True:
                 curr_angle = get_angle(*dial_coords[:2], x, y)
                 angle = (curr_angle - start_angle)%(2*pi)
                 log.debug([dial_coords, start, x, y, start_angle, curr_angle, angle])
+
     sleep(0.1)
